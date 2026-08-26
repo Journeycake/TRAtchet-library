@@ -1,3 +1,4 @@
+import { sha256 } from "@noble/hashes/sha2.js";
 import { create } from "zustand";
 import {
   Session,
@@ -5,6 +6,7 @@ import {
   describeHeader,
   fingerprint,
   fromUtf8,
+  identityFromSeed,
   toHex,
   utf8,
   type CryptoTrace,
@@ -70,17 +72,23 @@ type LabState = {
   exportHost: (from: HostId) => string;
 };
 
-const sessions: Record<HostId, Session> = {
-  alpha: new Session(),
-  bravo: new Session(),
-};
+function labIdentity(tag: "alpha" | "bravo") {
+  return identityFromSeed(sha256(utf8(`TRatchet-lab-v2:${tag}`)).subarray(0, 32));
+}
+
+function makePinnedPair(): Record<HostId, Session> {
+  const idA = labIdentity("alpha");
+  const idB = labIdentity("bravo");
+  return {
+    alpha: new Session({ identity: idA, peerIdentity: idB.publicKey }),
+    bravo: new Session({ identity: idB, peerIdentity: idA.publicKey }),
+  };
+}
+
+let sessions: Record<HostId, Session> = makePinnedPair();
 
 function snap(id: HostId): SessionSnapshot {
   return sessions[id].snapshot();
-}
-
-function emptySnap(): SessionSnapshot {
-  return new Session().snapshot();
 }
 
 let seq = 0;
@@ -152,7 +160,7 @@ export const useLab = create<LabState>((set, get) => {
           const kind = classifyHandshake(reply) === "resp" ? "resp" : "init";
           enqueue(to, kind, {
             bytes: reply,
-            note: kind === "resp" ? "Handshake response" : "Handshake init",
+            note: kind === "resp" ? "Handshake response · Ed25519 signed" : "Handshake init",
           });
         }
         publish();
@@ -192,8 +200,8 @@ export const useLab = create<LabState>((set, get) => {
   }
 
   return {
-    alpha: emptySnap(),
-    bravo: emptySnap(),
+    alpha: snap("alpha"),
+    bravo: snap("bravo"),
     alphaLog: [],
     bravoLog: [],
     wire: [],
@@ -212,7 +220,7 @@ export const useLab = create<LabState>((set, get) => {
         const msg = sessions.alpha.handshakeInit();
         enqueue("alpha", "init", {
           bytes: msg,
-          note: `Initiator offer · ${msg.length} B`,
+          note: `Initiator offer · Ed25519 signed · ${msg.length} B`,
         });
         publish();
       } catch (err) {
@@ -323,12 +331,11 @@ export const useLab = create<LabState>((set, get) => {
     reset: () => {
       sessions.alpha.free();
       sessions.bravo.free();
-      sessions.alpha = new Session();
-      sessions.bravo = new Session();
+      sessions = makePinnedPair();
       seq = 0;
       set({
-        alpha: emptySnap(),
-        bravo: emptySnap(),
+        alpha: snap("alpha"),
+        bravo: snap("bravo"),
         alphaLog: [],
         bravoLog: [],
         wire: [],

@@ -1,4 +1,4 @@
-# Security notes — TRatchet v0.3
+# Security notes — TRatchet v0.4
 
 This is a **lab / reference** implementation. It has not been independently reviewed. Treat findings below as open work, not as a claim of fitness.
 
@@ -7,23 +7,30 @@ This is a **lab / reference** implementation. It has not been independently revi
 - Two hosts, both online, want a session outside TLS.
 - Hybrid: classical break or PQ break alone should not recover message keys.
 - Forward secrecy per message; post-compromise security after a DH ratchet **and** a completed PQ epoch.
+- Handshake authenticated by long-term Ed25519 identities. A pin of the peer public key (or an out-of-band TOFU check) is required to name *who* that identity is.
 - Transport is untrusted except where the caller adds OS checks (Unix peer cred, TCP allowlists).
 
-## Critical — must fix before any real deployment
+## Addressed in v0.4
 
-### 1. Handshake is unauthenticated (MITM)
+### Handshake signatures (was Critical #1)
 
-`createInit` / `respondInit` carry ephemeral X25519 and ML-KEM material with **no signature, no identity key, no TOFU pin**. An on-path attacker can run two sessions and decrypt both. PQXDH as used in Signal binds to **prekeys + identity**; this online variant does not.
+Both flights carry an Ed25519 public key and signature.
 
-**Fix:** long-term identity (Ed25519 or ML-DSA) signed into the handshake transcript, or TOFU of the first DH+KEM fingerprint with an out-of-band check.
+- Initiator signs `TRATCHET-HS-INIT-v2 ‖ version ‖ sid ‖ nonceI ‖ dhPkI ‖ kemPk ‖ idPkI`.
+- Responder signs `TRATCHET-HS-RESP-v2 ‖ version ‖ sid ‖ nonceI ‖ nonceR ‖ dhPkI ‖ dhPkR ‖ kemPk ‖ kemCt ‖ idPkI ‖ idPkR`.
+- Root and PQ HKDF info include `sid ‖ idPkI ‖ idPkR`, so two half-sessions cannot be spliced into one key.
+- `new Session({ peerIdentity })` is a pin. Mismatch → `TR_IDENTITY`. Forged signature → `TR_SIG`.
+- **Still TOFU without a pin:** a first-contact MITM who completes *two* sessions (A↔M and M↔B) succeeds if neither side pins. The lab and Node host pair pin both identities.
 
-### 2. Handshake records are not AEAD-protected
+## Critical — still open
 
-Init/resp are length-prefixed plaintext. Length and version are attacker-controlled until the first data record. A responder will run ML-KEM encapsulate on any well-formed init (CPU DoS).
+### 1. Handshake CPU DoS / replay
 
-**Fix:** cookie / retry-cookie, rate limit, and/or a signed/AAD transcript. Bind the handshake transcript into the first root KDF (already includes nonces + sid; add identity hashes).
+Init/resp are length-prefixed plaintext. A responder verifies Ed25519 (cheap) then runs ML-KEM encapsulate on any well-formed, correctly signed init (CPU DoS). A captured init can be replayed; the initiator never finishes.
 
-### 3. `exportState` is JSON hex of live secrets
+**Fix:** cookie / retry-cookie, rate limit, and a handshake replay cache keyed by `(idPkI, sid, nonceI)`.
+
+### 2. `exportState` is JSON hex of live secrets
 
 Root key, chain keys, DH secret, PQ chains are written as UTF-8 JSON. No wrapping key, no mlock, copies survive in V8 strings. `importState` also omits skipped keys, in-flight SPQR chunks, and `offerSk`.
 
@@ -90,7 +97,7 @@ XChaCha20 nonce comes from `kdfHybrid`. Unique if hybrid MK is unique. If a bug 
 - Same-process Node pair does not exercise `SO_PEERCRED` across uids.
 - No formal spec for record MAX, version negotiation, or downgrade.
 - `installEpoch` is a `u8` while SPQR epoch is `u16` — install flag wraps at 256.
-- Handshake IKM does not include raw public keys as an extra transcript hash (DH/KEM shared secrets bind them, identity still missing).
+- Handshake IKM does not include raw DH/KEM public keys as an extra transcript hash (shared secrets plus Ed25519 signatures bind them).
 - `RecordParser` concatenates into a growing buffer; bounded by `MAX_RECORD` per frame, not by total connection lifetime.
 - Lab snapshot fingerprints leak chain-key prefixes into the UI.
 
@@ -110,14 +117,14 @@ XChaCha20 nonce comes from `kdfHybrid`. Unique if hybrid MK is unique. If a bug 
 - Direction change triggers a sending DH ratchet.
 - Length-prefixed streams; handshake sizes fixed.
 - ML-KEM-768 via `@noble/post-quantum` (FIPS 203).
-- Tests cover round-trip, out-of-order (2), DH ratchet, SPQR parity recovery, TCP and Unix pairs, plus adversarial rollback.
+- Tests cover round-trip, out-of-order (2), DH ratchet, SPQR parity recovery, TCP and Unix pairs, adversarial rollback, and Ed25519 pin / signature failures.
 
 ## Suggested next cuts (priority)
 
-1. Identity signatures on the handshake transcript  
+1. Handshake cookies / rate-limit / replay cache  
 2. Control flag in header  
 3. Unix `SO_PEERCRED` + non-tmp bind  
 4. Drop or wrap `exportState`  
-5. Handshake cookies / rate-limit  
-6. u32 counters on the wire  
-7. Bind handshake public keys + identity into the root KDF transcript
+5. u32 counters on the wire  
+6. Persist lab identities across reset for a real TOFU demo  
+

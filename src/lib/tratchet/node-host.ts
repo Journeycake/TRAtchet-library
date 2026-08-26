@@ -12,6 +12,7 @@ import {
   splitDataRecord,
 } from "./framing.ts";
 import { describeHeader } from "./header.ts";
+import { identityKeygen } from "./identity.ts";
 import { RECORD_LEN_SIZE } from "./params.ts";
 import { Session } from "./session.ts";
 import type {
@@ -164,8 +165,10 @@ export async function runHostPair(opts: {
   const push = (e: Omit<HostPairEvent, "t">) =>
     events.push({ t: Date.now() - t0, ...e });
 
-  const alpha = new Session();
-  const bravo = new Session();
+  const idA = identityKeygen();
+  const idB = identityKeygen();
+  const alpha = new Session({ identity: idA, peerIdentity: idB.publicKey });
+  const bravo = new Session({ identity: idB, peerIdentity: idA.publicKey });
   const opened = await openPair(opts.transport);
   let records = 0;
   let bytesOnWire = 0;
@@ -224,7 +227,7 @@ export async function runHostPair(opts: {
     push({
       host: "alpha",
       kind: "handshake",
-      text: `PQXDH init · ${init.length} B payload + ${RECORD_LEN_SIZE} B length`,
+      text: `PQXDH init · Ed25519 pin · ${init.length} B payload + ${RECORD_LEN_SIZE} B length`,
       bytes: initBytes,
     });
 
@@ -237,7 +240,7 @@ export async function runHostPair(opts: {
     push({
       host: "bravo",
       kind: "handshake",
-      text: `PQXDH resp · ${resp.length} B payload + ${RECORD_LEN_SIZE} B length`,
+      text: `PQXDH resp · Ed25519 pin · ${resp.length} B payload + ${RECORD_LEN_SIZE} B length`,
       bytes: respBytes,
     });
 
@@ -246,7 +249,7 @@ export async function runHostPair(opts: {
     push({
       host: "wire",
       kind: "info",
-      text: `session ${fingerprint(alpha.sessionId!)} established over ${opts.transport}`,
+      text: `session ${fingerprint(alpha.sessionId!)} · peer ${alpha.snapshot().peerIdFp} · ${opts.transport}`,
     });
 
     await sendApp("alpha", "session-layer up from alpha");
@@ -281,6 +284,8 @@ export async function runHostPair(opts: {
         lastMk: v.lastHybridFp,
         pqPhase: v.pq?.phase ?? "none",
         pqEpoch: v.pq?.epoch ?? 0,
+        idFp: v.idFp,
+        peerIdFp: v.peerIdFp,
       };
     };
 

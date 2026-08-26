@@ -4,6 +4,7 @@ import {
   AEAD_NAME,
   CLASSICAL_DH,
   HEADER_LEN,
+  IDENTITY_SIG,
   MAX_PLAINTEXT,
   MAX_SKIP,
   MLKEM_CT_LEN,
@@ -21,7 +22,7 @@ export function ProtocolPage() {
       <LabNav current="protocol" />
 
       <article className="mx-auto max-w-3xl px-4 py-10 lg:py-14">
-        <p className="font-mono text-xs tracking-wide text-accent">v0.3 · session layer</p>
+        <p className="font-mono text-xs tracking-wide text-accent">v0.4 · session layer</p>
         <h1 className="mt-2 text-3xl font-medium tracking-tight text-fg lg:text-4xl">
           Online PQXDH handshake plus Triple Ratchet
         </h1>
@@ -43,7 +44,7 @@ export function ProtocolPage() {
               ["KDF", "HKDF-SHA256 + HMAC-SHA256 chain"],
               ["Engine", "TypeScript (portable; C ABI later via WASM)"],
               ["SCKA provider", "Thin custom ML-KEM-768 under project control"],
-              ["Identity", "Pure ephemeral; session id bound as AAD"],
+              ["Identity", `${IDENTITY_SIG} signatures on both flights; optional TOFU pin`],
               ["Primitive source", "@noble/post-quantum (FIPS 203) + @noble/curves"],
             ]}
           />
@@ -52,16 +53,20 @@ export function ProtocolPage() {
         <Section title="Phase 1 — online handshake">
           <p>
             Both hosts must be reachable. There is no offline pre-key bundle.
-            Initiator sends ephemeral X25519 public key, ML-KEM-768 encapsulation
-            key ({MLKEM_PK_LEN} B), and a nonce. Responder replies with its
-            X25519 public key, ML-KEM ciphertext ({MLKEM_CT_LEN} B), and nonce.
-            Shared secret is HKDF of the DH output concatenated with the KEM
-            shared secret — breaking only one primitive is not enough.
+            Each host holds a long-term Ed25519 identity. Initiator sends
+            ephemeral X25519 public key, ML-KEM-768 encapsulation key
+            ({MLKEM_PK_LEN} B), nonce, identity public key, and a signature over
+            that transcript. Responder replies with X25519 public key, ML-KEM
+            ciphertext ({MLKEM_CT_LEN} B), nonce, its identity, and a signature
+            covering <em>both</em> flights. Session keys mix both identity
+            public keys into HKDF, so a MITM cannot splice two half-sessions
+            into one. Pass the peer's identity to pin it; omit the pin for
+            TOFU of the first verified key.
           </p>
           <ol className="mt-4 space-y-2 font-mono text-sm text-muted">
-            <li>1. Alpha → INIT (TR1I) · sid · nonce · X25519 pk · ML-KEM pk</li>
-            <li>2. Bravo → RESP (TR1R) · sid · nonce · X25519 pk · ML-KEM ct</li>
-            <li>3. Both derive RK, sending/receiving chains, and PQ chains</li>
+            <li>1. Alpha → INIT (TR1I) · sid · nonce · X25519 pk · ML-KEM pk · Ed25519 pk · sig</li>
+            <li>2. Bravo verifies sig, optional pin, then RESP (TR1R) · same fields with CT · sig over both flights</li>
+            <li>3. Alpha verifies Bravo's sig and pin, then both derive RK bound to both identities</li>
           </ol>
         </Section>
 
@@ -72,7 +77,7 @@ export function ProtocolPage() {
             lockstep. The final message key is
           </p>
           <pre className="mt-3 overflow-x-auto rounded-lg bg-bg-elevated p-4 font-mono text-xs text-accent shadow-[var(--shadow-border)]">
-            {`final_mk = HKDF(ec_mk || pq_mk, info="TRATCHET-HYBRID-MK-v1")
+            {`final_mk = HKDF(ec_mk || pq_mk, info="TRATCHET-HYBRID-MK-v2")
 nonce    = 24 bytes from the same HKDF
 AEAD     = XChaCha20-Poly1305(final_mk, nonce, aad=sid||header)`}
           </pre>
@@ -132,6 +137,12 @@ AEAD     = XChaCha20-Poly1305(final_mk, nonce, aad=sid||header)`}
               <span className="text-fg">Hybrid binding.</span> An attacker must
               break X25519 and ML-KEM-768 to recover any final message key.
             </li>
+            <li>
+              <span className="text-fg">Identity binding.</span> Ed25519
+              signatures cover both handshake flights. Session keys mix both
+              identity public keys. A pin names the peer; without a pin this
+              is TOFU.
+            </li>
           </ul>
         </Section>
 
@@ -150,7 +161,7 @@ int tr_session_export_state(tr_session_t *s, uint8_t *buf, size_t *len);
 int tr_session_import_state(tr_session_t *s, const uint8_t *buf, size_t len);`}</pre>
           <p className="mt-3 text-sm text-muted">
             The TypeScript <code className="font-mono text-fg">Session</code> class
-            matches this surface today. Packaging (.deb, .rpm, Homebrew) is Phase 3.
+            matches this surface today. Packaging (.deb, .rpm, Homebrew) is Phase 4.
           </p>
         </Section>
 
@@ -167,9 +178,12 @@ int tr_session_import_state(tr_session_t *s, const uint8_t *buf, size_t len);`}<
               Fixed 176-byte headers, skipped-key bounds, export/import, lab
               wire with drop/deliver.
             </Phase>
-            <Phase n="3" title="Packaging">
-              C ABI via WASM, .deb / .rpm / Homebrew, CI matrix, identity
-              binding with long-term keys.
+            <Phase n="3" title="Identity binding" done>
+              Ed25519 signatures on both handshake flights, identities mixed
+              into the root HKDF, optional peer pin (TOFU if omitted).
+            </Phase>
+            <Phase n="4" title="Packaging">
+              C ABI via WASM, .deb / .rpm / Homebrew, CI matrix.
             </Phase>
           </ol>
         </Section>

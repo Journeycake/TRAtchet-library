@@ -26,6 +26,8 @@ export type HostPairSnap = {
   lastMk: string;
   pqPhase: string;
   pqEpoch: number;
+  idFp: string;
+  peerIdFp: string;
 };
 
 export type HostPairResult = {

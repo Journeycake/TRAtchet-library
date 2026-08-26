@@ -37,7 +37,10 @@ export function HostPanel({ id }: { id: HostId }) {
         </div>
         <div className="min-w-0">
           <h2 className="text-sm font-medium text-fg">{label}</h2>
-          <p className="font-mono text-xs text-muted">{role}</p>
+          <p className="font-mono text-xs text-muted">
+            {role} · id {shortHex(snap.idFp, 8)}
+            {snap.peerIdFp ? ` · peer ${shortHex(snap.peerIdFp, 8)}` : snap.idPinned ? " · pin set" : ""}
+          </p>
         </div>
         <Badge
           tone={

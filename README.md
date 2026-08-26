@@ -1,6 +1,6 @@
 # TRatchet
 
-Session-layer hybrid ratchet for host-to-host communication. v0.3 **reference** — not a production cryptographic suite.
+Session-layer hybrid ratchet for host-to-host communication. v0.4 **reference** — not a production cryptographic suite.
 
 Repo: [Journeycake/TRAtchet-library](https://github.com/Journeycake/TRAtchet-library) (GPL-3.0).
 
@@ -10,14 +10,14 @@ The library performs **no network I/O**. Callers supply TCP, a Unix socket, or a
 
 | | |
 |---|---|
-| Spec | v0.3 online PQXDH + Triple Ratchet (SPQR) |
-| Handshake | X25519 + ML-KEM-768, two flights |
+| Spec | v0.4 online PQXDH + Triple Ratchet (SPQR) + Ed25519 identities |
+| Handshake | X25519 + ML-KEM-768, two flights, Ed25519 signatures |
 | Data | Double Ratchet (X25519) + sparse PQ epoch, hybrid HKDF, XChaCha20-Poly1305 |
 | Header | 176 B fixed; 2×64 B SPQR chunks |
 | Stream framing | 4 B big-endian length prefix |
 | License | GPL-3.0-or-later |
 
-**Do not ship this as a TLS replacement yet.** See [SECURITY.md](SECURITY.md).
+**Do not ship this as a TLS replacement yet.** See [SECURITY.md](SECURITY.md). Without a peer pin, first-contact TOFU is still MITM-able.
 
 ## Layout
 
@@ -31,11 +31,15 @@ docs/spec.md                    build target spec
 ## Library API
 
 ```ts
-import { Session } from "./src/lib/tratchet/session.ts";
+import { Session, identityKeygen } from "./src/lib/tratchet/index.ts";
 
-const a = new Session();
+const idA = identityKeygen();
+const idB = identityKeygen();
+
+const a = new Session({ identity: idA, peerIdentity: idB.publicKey });
+const b = new Session({ identity: idB, peerIdentity: idA.publicKey });
+
 const offer = a.handshakeInit();
-const b = new Session();
 const reply = b.ingestHandshake(offer);
 a.ingestHandshake(reply!);
 
@@ -43,7 +47,7 @@ const { header, ciphertext } = a.encrypt(payload);
 const plain = b.decrypt(header, ciphertext);
 ```
 
-On a stream, wrap each handshake blob or `header ‖ ciphertext` with `encodeRecord` from `framing.ts`.
+Omit `peerIdentity` for TOFU (accept whatever identity signed the handshake). On a stream, wrap each handshake blob or `header ‖ ciphertext` with `encodeRecord` from `framing.ts`.
 
 ## Tests
 

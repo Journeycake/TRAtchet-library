@@ -17,9 +17,10 @@ import {
   type HandshakeSecrets,
   type Role,
 } from "./handshake.ts";
+import { identityKeygen, type IdentityKeyPair } from "./identity.ts";
 import { decodeHeader, encodeHeader, type DataHeader } from "./header.ts";
 import { kdfCk, kdfHybrid, kdfInstallMk } from "./kdf.ts";
-import { MAX_PLAINTEXT, MAX_SKIP, MAX_SKIPPED_STORE } from "./params.ts";
+import { ED25519_PK_LEN, MAX_PLAINTEXT, MAX_SKIP, MAX_SKIPPED_STORE } from "./params.ts";
 import { DoubleRatchet } from "./ratchet.ts";
 import { SparseRatchet } from "./spqr.ts";
 
@@ -64,6 +65,15 @@ export type SessionSnapshot = {
   lastEcMkFp: string;
   lastPqMkFp: string;
   pq: ReturnType<SparseRatchet["view"]> | null;
+  idFp: string;
+  peerIdFp: string;
+  idPinned: boolean;
+};
+
+export type SessionOpts = {
+  identity?: IdentityKeyPair;
+  /** Expected peer Ed25519 public key. Reject handshake if it differs. */
+  peerIdentity?: Uint8Array;
 };
 
 type Hybrid = { key: Uint8Array; nonce: Uint8Array };
@@ -81,10 +91,29 @@ export class Session {
   lastPqMkFp = "";
   lastError: string | null = null;
   private pendingSendRatchet = false;
+  private readonly identity: IdentityKeyPair;
+  private readonly ownedIdentity: boolean;
+  private readonly peerPin: Uint8Array | null;
+  peerIdentity: Uint8Array | null = null;
+
+  constructor(opts: SessionOpts = {}) {
+    this.ownedIdentity = !opts.identity;
+    this.identity = opts.identity ?? identityKeygen();
+    if (opts.peerIdentity) {
+      if (opts.peerIdentity.length !== ED25519_PK_LEN) throw new Error("TR_ID_PK");
+      this.peerPin = opts.peerIdentity.slice();
+    } else {
+      this.peerPin = null;
+    }
+  }
+
+  get identityPublic(): Uint8Array {
+    return this.identity.publicKey;
+  }
 
   handshakeInit(): Uint8Array {
     this.assertPhase("idle");
-    const { msg, pending } = createInit();
+    const { msg, pending } = createInit(this.identity, this.peerPin);
     this.pending = pending;
     this.sessionId = pending.sessionId;
     this.role = "initiator";
@@ -94,7 +123,7 @@ export class Session {
 
   handshakeRespond(inMsg: Uint8Array): Uint8Array {
     this.assertPhase("idle");
-    const { msg, secrets } = respondInit(inMsg);
+    const { msg, secrets } = respondInit(inMsg, this.identity, this.peerPin);
     this.installSecrets(secrets);
     return msg;
   }
@@ -275,6 +304,9 @@ export class Session {
       lastEcMkFp: dr?.lastEcMkFp ?? "",
       lastPqMkFp: this.lastPqMkFp,
       pq: pq ? pq.view() : null,
+      idFp: fingerprint(this.identity.publicKey),
+      peerIdFp: this.peerIdentity ? fingerprint(this.peerIdentity) : "",
+      idPinned: this.peerPin !== null,
     };
   }
 
@@ -287,7 +319,7 @@ export class Session {
     const dr = this.dr!;
     const pq = this.pq!;
     const obj = {
-      v: 1,
+      v: 2,
       role: this.role,
       sid: toHex(this.sessionId!),
       ns: dr.ns,
@@ -303,18 +335,21 @@ export class Session {
       pqRecv: toHex(pq.pqRecv),
       epoch: pq.epoch,
       lastInstalled: pq.lastInstalled,
+      idLocal: toHex(this.identity.publicKey),
+      idPeer: this.peerIdentity ? toHex(this.peerIdentity) : "",
     };
     return utf8(JSON.stringify(obj));
   }
 
   importState(buf: Uint8Array): void {
     const obj = JSON.parse(fromUtf8(buf)) as Record<string, string | number>;
-    if (obj.v !== 1) throw new Error("TR_STATE_VERSION");
+    if (obj.v !== 1 && obj.v !== 2) throw new Error("TR_STATE_VERSION");
     // Restore is a lab feature; a fresh Session is expected.
     this.free();
     this.role = obj.role as Role;
     this.sessionId = fromHex(String(obj.sid));
     this.phase = "established";
+    const idPeerHex = obj.idPeer ? String(obj.idPeer) : "";
     const secrets: HandshakeSecrets = {
       role: this.role,
       sessionId: this.sessionId,
@@ -328,6 +363,8 @@ export class Session {
         publicKey: fromHex(String(obj.dhsPk)),
       },
       dhRemote: fromHex(String(obj.dhr)),
+      idLocal: this.identity.publicKey.slice(),
+      idPeer: idPeerHex ? fromHex(idPeerHex) : new Uint8Array(ED25519_PK_LEN),
     };
     this.installSecrets(secrets);
     this.dr!.ns = Number(obj.ns);
@@ -359,6 +396,8 @@ export class Session {
     }
     for (const v of this.skipped.values()) zeroize(v.key, v.nonce);
     this.skipped.clear();
+    if (this.ownedIdentity) zeroize(this.identity.secretKey);
+    this.peerIdentity = null;
     this.dr = null;
     this.pq = null;
     this.phase = "closed";
@@ -367,6 +406,7 @@ export class Session {
   private installSecrets(secrets: HandshakeSecrets): void {
     this.sessionId = secrets.sessionId;
     this.role = secrets.role;
+    this.peerIdentity = secrets.idPeer.slice();
     this.dr = new DoubleRatchet(secrets);
     const pqSend = secrets.role === "initiator" ? secrets.pqInit : secrets.pqResp;
     const pqRecv = secrets.role === "initiator" ? secrets.pqResp : secrets.pqInit;

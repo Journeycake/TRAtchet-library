@@ -29,7 +29,13 @@ export function StatusStrip() {
       <span className="hidden h-3 w-px bg-border sm:block" />
       <Badge tone={established ? "ok" : "muted"}>X25519</Badge>
       <Badge tone={established ? "ok" : "muted"}>ML-KEM-768</Badge>
+      <Badge tone={established ? "ok" : "muted"}>Ed25519</Badge>
       <Badge tone={established ? "ok" : "muted"}>XChaCha20-Poly1305</Badge>
+      {established && alpha.peerIdFp ? (
+        <Badge tone="ok">peer {shortHex(alpha.peerIdFp, 8)}</Badge>
+      ) : alpha.idPinned ? (
+        <Badge>Ed25519 pin ready</Badge>
+      ) : null}
       {pq ? (
         <div className="ml-auto flex min-w-40 items-center gap-2">
           <span className="font-mono text-xs text-muted">
