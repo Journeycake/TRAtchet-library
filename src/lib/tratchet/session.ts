@@ -17,7 +17,7 @@ import {
   type HandshakeSecrets,
   type Role,
 } from "./handshake.ts";
-import { decodeHeader, encodeHeader } from "./header.ts";
+import { decodeHeader, encodeHeader, type DataHeader } from "./header.ts";
 import { kdfCk, kdfHybrid, kdfInstallMk } from "./kdf.ts";
 import { MAX_PLAINTEXT, MAX_SKIP, MAX_SKIPPED_STORE } from "./params.ts";
 import { DoubleRatchet } from "./ratchet.ts";
@@ -122,7 +122,8 @@ export class Session {
     if (plaintext.length > MAX_PLAINTEXT) throw new Error("TR_PLAINTEXT_TOO_LARGE");
     const dr = this.dr!;
     const pq = this.pq!;
-    if (this.pendingSendRatchet) {
+    // Direction change, or the u16 counter is about to wrap.
+    if (this.pendingSendRatchet || dr.ns > 0xffff) {
       dr.sendingRatchet();
       this.pendingSendRatchet = false;
     }
@@ -179,67 +180,67 @@ export class Session {
     const dr = this.dr!;
     const pq = this.pq!;
     const h = decodeHeader(header);
-    pq.ingest(h.slots);
+    const aad = concat(this.sessionId!, header);
 
     const skipped = this.skipped.get(skipId(h.dhPub, h.n));
     if (skipped) {
-      this.skipped.delete(skipId(h.dhPub, h.n));
-      const aad = concat(this.sessionId!, header);
       const pt = aeadOpen(skipped.key, skipped.nonce, ciphertext, aad);
+      this.skipped.delete(skipId(h.dhPub, h.n));
       zeroize(skipped.key, skipped.nonce);
+      pq.ingest(h.slots);
       this.pendingSendRatchet = true;
+      this.lastTrace = this.makeTrace("recv", h, header.length, ciphertext.length, pt.length, false);
       return pt;
     }
 
-    let dhRatchet = false;
-    if (!dr.sameRemote(h.dhPub)) {
-      this.skipUntil(dr.dhr, h.pn);
-      dr.receivingRatchet(h.dhPub);
-      dhRatchet = true;
+    if (dr.sameRemote(h.dhPub) && h.n < dr.nr) {
+      throw new Error("TR_REPLAY");
     }
-    this.skipUntil(h.dhPub, h.n);
 
-    const ecMk = dr.recvStep();
-    const stepped = kdfCk(pq.pqRecv);
-    pq.pqRecv = stepped.ck;
-    let pqMk = stepped.mk;
-    if (h.installEpoch && pq.pendingSs) {
-      const mixed = kdfInstallMk(pqMk, pq.pendingSs);
-      zeroize(pqMk);
-      pqMk = mixed;
-    }
-    const hybrid = kdfHybrid(ecMk, pqMk);
-    this.lastPqMkFp = fingerprint(pqMk);
-    this.lastHybridFp = fingerprint(hybrid.key);
-    zeroize(ecMk, pqMk);
-    if (h.installEpoch) pq.consumeInstall(h.installEpoch);
-    const aad = concat(this.sessionId!, header);
+    const snap = this.captureWork();
     try {
-      const pt = aeadOpen(hybrid.key, hybrid.nonce, ciphertext, aad);
-      zeroize(hybrid.key, hybrid.nonce);
-      this.pendingSendRatchet = true;
-      this.lastTrace = {
-        direction: "recv",
-        n: h.n,
-        pn: h.pn,
-        dhRatchet,
-        ecMkFp: dr.lastEcMkFp,
-        pqMkFp: this.lastPqMkFp,
-        hybridMkFp: this.lastHybridFp,
-        headerLen: header.length,
-        ctLen: ciphertext.length,
-        ptLen: pt.length,
-        installEpoch: h.installEpoch,
-        spqr: {
-          epoch: h.slots[0]?.epoch ?? pq.epoch,
-          type: ["none", "pk", "ct"][h.slots[0]?.type ?? 0] ?? "none",
-          idx: h.slots.map((s) => String(s.idx)).join(",") || "—",
-          total: h.slots[0]?.total ?? 0,
-        },
-      };
-      return pt;
+      let dhRatchet = false;
+      if (!dr.sameRemote(h.dhPub)) {
+        this.skipUntil(dr.dhr, h.pn);
+        dr.receivingRatchet(h.dhPub);
+        dhRatchet = true;
+      }
+      this.skipUntil(h.dhPub, h.n);
+
+      const ecMk = dr.recvStep();
+      const stepped = kdfCk(pq.pqRecv);
+      pq.pqRecv = stepped.ck;
+      let pqMk = stepped.mk;
+      if (h.installEpoch && pq.pendingSs) {
+        const mixed = kdfInstallMk(pqMk, pq.pendingSs);
+        zeroize(pqMk);
+        pqMk = mixed;
+      }
+      const hybrid = kdfHybrid(ecMk, pqMk);
+      this.lastPqMkFp = fingerprint(pqMk);
+      this.lastHybridFp = fingerprint(hybrid.key);
+      zeroize(ecMk, pqMk);
+      try {
+        const pt = aeadOpen(hybrid.key, hybrid.nonce, ciphertext, aad);
+        zeroize(hybrid.key, hybrid.nonce);
+        pq.ingest(h.slots);
+        if (h.installEpoch) pq.consumeInstall(h.installEpoch);
+        this.pendingSendRatchet = true;
+        this.lastTrace = this.makeTrace(
+          "recv",
+          h,
+          header.length,
+          ciphertext.length,
+          pt.length,
+          dhRatchet,
+        );
+        return pt;
+      } catch (err) {
+        zeroize(hybrid.key, hybrid.nonce);
+        throw err;
+      }
     } catch (err) {
-      zeroize(hybrid.key, hybrid.nonce);
+      this.restoreWork(snap);
       throw err;
     }
   }
@@ -373,6 +374,105 @@ export class Session {
     this.phase = "established";
   }
 
+  private makeTrace(
+    direction: "send" | "recv",
+    h: DataHeader,
+    headerLen: number,
+    ctLen: number,
+    ptLen: number,
+    dhRatchet: boolean,
+  ): CryptoTrace {
+    const pq = this.pq!;
+    return {
+      direction,
+      n: h.n,
+      pn: h.pn,
+      dhRatchet,
+      ecMkFp: this.dr!.lastEcMkFp,
+      pqMkFp: this.lastPqMkFp,
+      hybridMkFp: this.lastHybridFp,
+      headerLen,
+      ctLen,
+      ptLen,
+      installEpoch: h.installEpoch,
+      spqr: {
+        epoch: h.slots[0]?.epoch ?? pq.epoch,
+        type: ["none", "pk", "ct"][h.slots[0]?.type ?? 0] ?? "none",
+        idx: h.slots.map((s) => String(s.idx)).join(",") || "—",
+        total: h.slots[0]?.total ?? 0,
+      },
+    };
+  }
+
+  private captureWork(): WorkSnap {
+    const dr = this.dr!;
+    const pq = this.pq!;
+    return {
+      dr: {
+        rk: dr.rk.slice(),
+        cks: dr.cks.slice(),
+        ckr: dr.ckr.slice(),
+        dhsSk: dr.dhs.secretKey.slice(),
+        dhsPk: dr.dhs.publicKey.slice(),
+        dhr: dr.dhr.slice(),
+        ns: dr.ns,
+        nr: dr.nr,
+        pn: dr.pn,
+      },
+      pq: {
+        epoch: pq.epoch,
+        recv: copyU8Map(pq.recv),
+        recvTotal: pq.recvTotal,
+        recvType: pq.recvType,
+        recvEpoch: pq.recvEpoch,
+        offerChunks: copyChunks(pq.offerChunks),
+        offerSk: pq.offerSk?.slice() ?? null,
+        sendCursor: pq.sendCursor,
+        ctChunks: copyChunks(pq.ctChunks),
+        ctCursor: pq.ctCursor,
+        pendingSs: pq.pendingSs?.slice() ?? null,
+        installPending: pq.installPending,
+        lastInstalled: pq.lastInstalled,
+        phase: pq.phase,
+        pqSend: pq.pqSend.slice(),
+        pqRecv: pq.pqRecv.slice(),
+      },
+      skipped: copySkipped(this.skipped),
+      pendingSendRatchet: this.pendingSendRatchet,
+    };
+  }
+
+  private restoreWork(snap: WorkSnap): void {
+    const dr = this.dr!;
+    const pq = this.pq!;
+    dr.rk = snap.dr.rk;
+    dr.cks = snap.dr.cks;
+    dr.ckr = snap.dr.ckr;
+    dr.dhs = { secretKey: snap.dr.dhsSk, publicKey: snap.dr.dhsPk };
+    dr.dhr = snap.dr.dhr;
+    dr.ns = snap.dr.ns;
+    dr.nr = snap.dr.nr;
+    dr.pn = snap.dr.pn;
+    pq.epoch = snap.pq.epoch;
+    pq.recv = snap.pq.recv;
+    pq.recvTotal = snap.pq.recvTotal;
+    pq.recvType = snap.pq.recvType;
+    pq.recvEpoch = snap.pq.recvEpoch;
+    pq.offerChunks = snap.pq.offerChunks;
+    pq.offerSk = snap.pq.offerSk;
+    pq.sendCursor = snap.pq.sendCursor;
+    pq.ctChunks = snap.pq.ctChunks;
+    pq.ctCursor = snap.pq.ctCursor;
+    pq.pendingSs = snap.pq.pendingSs;
+    pq.installPending = snap.pq.installPending;
+    pq.lastInstalled = snap.pq.lastInstalled;
+    pq.phase = snap.pq.phase;
+    pq.pqSend = snap.pq.pqSend;
+    pq.pqRecv = snap.pq.pqRecv;
+    this.skipped = snap.skipped;
+    this.pendingSendRatchet = snap.pendingSendRatchet;
+  }
+
   private skipUntil(dhPub: Uint8Array, until: number): void {
     const dr = this.dr!;
     const pq = this.pq!;
@@ -410,4 +510,52 @@ export class Session {
 
 function skipId(dh: Uint8Array, n: number): string {
   return `${fingerprint(dh)}:${n}`;
+}
+
+type WorkSnap = {
+  dr: {
+    rk: Uint8Array;
+    cks: Uint8Array;
+    ckr: Uint8Array;
+    dhsSk: Uint8Array;
+    dhsPk: Uint8Array;
+    dhr: Uint8Array;
+    ns: number;
+    nr: number;
+    pn: number;
+  };
+  pq: {
+    epoch: number;
+    recv: Map<number, Uint8Array>;
+    recvTotal: number;
+    recvType: 0 | 1 | 2;
+    recvEpoch: number;
+    offerChunks: Uint8Array[] | null;
+    offerSk: Uint8Array | null;
+    sendCursor: number;
+    ctChunks: Uint8Array[] | null;
+    ctCursor: number;
+    pendingSs: Uint8Array | null;
+    installPending: boolean;
+    lastInstalled: number;
+    phase: NonNullable<SessionSnapshot["pq"]>["phase"];
+    pqSend: Uint8Array;
+    pqRecv: Uint8Array;
+  };
+  skipped: Map<string, Hybrid>;
+  pendingSendRatchet: boolean;
+};
+
+function copyChunks(chunks: Uint8Array[] | null): Uint8Array[] | null {
+  return chunks ? chunks.map((c) => c.slice()) : null;
+}
+
+function copyU8Map(map: Map<number, Uint8Array>): Map<number, Uint8Array> {
+  return new Map([...map].map(([k, v]) => [k, v.slice()]));
+}
+
+function copySkipped(map: Map<string, Hybrid>): Map<string, Hybrid> {
+  return new Map(
+    [...map].map(([k, v]) => [k, { key: v.key.slice(), nonce: v.nonce.slice() }]),
+  );
 }

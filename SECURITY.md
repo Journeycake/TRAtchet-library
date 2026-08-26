@@ -25,17 +25,17 @@ Init/resp are length-prefixed plaintext. Length and version are attacker-control
 
 ### 3. `exportState` is JSON hex of live secrets
 
-Root key, chain keys, DH secret, PQ chains are written as UTF-8 JSON. No wrapping key, no mlock, copies survive in V8 strings.
+Root key, chain keys, DH secret, PQ chains are written as UTF-8 JSON. No wrapping key, no mlock, copies survive in V8 strings. `importState` also omits skipped keys, in-flight SPQR chunks, and `offerSk`.
 
 **Fix:** lab-only API, or encrypt-at-rest with a caller-supplied wrap key; never log.
 
 ## High
 
-### 4. Unix bind is lab-unsafe
+### 4. Unix bind is still lab-grade
 
-`node-host.ts` places a random name in the shared temp directory, default mode, no `SO_PEERCRED`. Name squatting / symlink races apply. See unix(7).
+`node-host.ts` now uses `mkdtemp` + `chmod 0700` on the directory and `chmod 0600` on the socket. It still lives under the shared temp directory, still has no `SO_PEERCRED` allowlist, and still does not use the abstract namespace. Name squatting on the parent `/tmp` is reduced, not eliminated.
 
-**Fix:** dedicated `0700` dir, `chmod 0600` after bind, unlink-before-bind, `SO_PEERCRED` allowlist.
+**Fix:** dedicated `0700` dir outside world-writable parents, `SO_PEERCRED` uid allowlist, unlink-before-bind.
 
 ### 5. Empty plaintext is overloaded as a control frame
 
@@ -49,9 +49,7 @@ If `skipped.size > MAX_SKIPPED_STORE` (128), the **oldest map key** is dropped. 
 
 ### 7. Message numbers are `u16`
 
-`n` and `pn` wrap at 65536. There is no explicit rekey-before-wrap. A wrap without a DH ratchet reuses chain indices under a new chain only if a sending ratchet happened.
-
-**Fix:** force a DH ratchet before wrap, or use `u32` / `u64`.
+`n` and `pn` wrap at 65536. Encrypt now forces a DH ratchet before the counter exceeds `0xffff`. That is a local mitigation; the wire type is still 16-bit.
 
 ### 8. JavaScript cannot zeroize
 
@@ -59,19 +57,17 @@ If `skipped.size > MAX_SKIPPED_STORE` (128), the **oldest map key** is dropped. 
 
 ## Medium
 
-### 9. No X25519 contributory check
+### 9. X25519 contributory check — mitigated
 
-`x25519.getSharedSecret` is used as-is. Small-order public keys can yield the all-zero shared secret. Noble may clamp; still reject all-zero DH output explicitly.
+`dhShared` now rejects all-zero shared secrets and maps Noble's invalid-key errors to `TR_DH_WEAK`. Small-order points Noble already rejects stay rejected.
 
 ### 10. SPQR: single XOR parity, cleartext chunks
 
 Chunks live in the **unencrypted** header (authenticated as AEAD AAD with the ciphertext). Drop-one recovery only. A drop of two chunks in an epoch stalls PQ PCS. Malicious modification fails AEAD (good). Metadata (epoch, indices) is visible.
 
-### 11. SPQR ingest vs AEAD order
+### 11. SPQR ingest vs AEAD order — mitigated
 
-`decrypt` calls `pq.ingest(slots)` **before** AEAD success. Failed auth still advances sparse reconstruction state if header parsed. An attacker with a valid-looking header and garbage ct can poison chunk maps.
-
-**Fix:** ingest SPQR only after `aeadOpen` succeeds (or buffer slots until then).
+`decrypt` used to call `pq.ingest(slots)` **before** AEAD success. Failed auth still advanced sparse reconstruction. Ingest now runs only after `aeadOpen` succeeds. Failed records also restore Double Ratchet / skip-store snapshots so a garbage header cannot desync the session.
 
 ### 12. Root KDF shape differs from Signal
 
@@ -93,6 +89,19 @@ XChaCha20 nonce comes from `kdfHybrid`. Unique if hybrid MK is unique. If a bug 
 - PQ epoch length (~20 frames) is a traffic-analysis signal on a quiet session.
 - Same-process Node pair does not exercise `SO_PEERCRED` across uids.
 - No formal spec for record MAX, version negotiation, or downgrade.
+- `installEpoch` is a `u8` while SPQR epoch is `u16` — install flag wraps at 256.
+- Handshake IKM does not include raw public keys as an extra transcript hash (DH/KEM shared secrets bind them, identity still missing).
+- `RecordParser` concatenates into a growing buffer; bounded by `MAX_RECORD` per frame, not by total connection lifetime.
+- Lab snapshot fingerprints leak chain-key prefixes into the UI.
+
+## Mitigated in-tree (see `session.adversarial.test.ts`)
+
+- Failed AEAD no longer commits ratchet / SPQR / skip-store state.
+- Replay of a delivered `(dhPub, n)` throws `TR_REPLAY` without advancing.
+- Tampered DH pub in an otherwise well-formed header is rolled back.
+- Out-of-order skip keys are not dropped until AEAD succeeds.
+- All-zero / rejected X25519 publics throw `TR_DH_WEAK`.
+- `fromHex` rejects non-hex rather than silently writing `NaN → 0`.
 
 ## What is in decent shape
 
@@ -101,14 +110,14 @@ XChaCha20 nonce comes from `kdfHybrid`. Unique if hybrid MK is unique. If a bug 
 - Direction change triggers a sending DH ratchet.
 - Length-prefixed streams; handshake sizes fixed.
 - ML-KEM-768 via `@noble/post-quantum` (FIPS 203).
-- Tests cover round-trip, out-of-order (2), DH ratchet, SPQR parity recovery, TCP and Unix pairs.
+- Tests cover round-trip, out-of-order (2), DH ratchet, SPQR parity recovery, TCP and Unix pairs, plus adversarial rollback.
 
 ## Suggested next cuts (priority)
 
 1. Identity signatures on the handshake transcript  
-2. SPQR ingest after AEAD  
-3. Control flag in header  
-4. Reject zero DH secrets  
-5. Unix `0700` + `SO_PEERCRED`  
-6. Drop or wrap `exportState`  
-7. u32 counters + forced ratchet before wrap
+2. Control flag in header  
+3. Unix `SO_PEERCRED` + non-tmp bind  
+4. Drop or wrap `exportState`  
+5. Handshake cookies / rate-limit  
+6. u32 counters on the wire  
+7. Bind handshake public keys + identity into the root KDF transcript

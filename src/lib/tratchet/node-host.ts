@@ -4,7 +4,6 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { fingerprint, fromUtf8, utf8 } from "./bytes.ts";
 import {
   classifyRecord,
@@ -97,6 +96,7 @@ type Opened = {
   accepted: net.Socket;
   bind: string;
   sockPath?: string;
+  sockDir?: string;
 };
 
 async function openPair(transport: HostTransport): Promise<Opened> {
@@ -104,11 +104,21 @@ async function openPair(transport: HostTransport): Promise<Opened> {
   server.maxConnections = 1;
 
   let sockPath: string | undefined;
+  let sockDir: string | undefined;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     if (transport === "unix") {
-      sockPath = path.join(os.tmpdir(), `tratchet-${randomUUID()}.sock`);
-      server.listen(sockPath, resolve);
+      sockDir = fs.mkdtempSync(path.join(os.tmpdir(), "tratchet-"));
+      fs.chmodSync(sockDir, 0o700);
+      sockPath = path.join(sockDir, "s");
+      server.listen(sockPath, () => {
+        try {
+          fs.chmodSync(sockPath!, 0o600);
+        } catch {
+          /* best-effort */
+        }
+        resolve();
+      });
     } else {
       server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, resolve);
     }
@@ -142,7 +152,7 @@ async function openPair(transport: HostTransport): Promise<Opened> {
   });
 
   const accepted = await acceptedP;
-  return { server, client, accepted, bind, sockPath };
+  return { server, client, accepted, bind, sockPath, sockDir };
 }
 
 export async function runHostPair(opts: {
@@ -293,6 +303,13 @@ export async function runHostPair(opts: {
     if (opened.sockPath) {
       try {
         fs.unlinkSync(opened.sockPath);
+      } catch {
+        /* already gone */
+      }
+    }
+    if (opened.sockDir) {
+      try {
+        fs.rmdirSync(opened.sockDir);
       } catch {
         /* already gone */
       }

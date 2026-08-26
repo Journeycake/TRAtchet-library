@@ -15,5 +15,14 @@ export function dhPublic(secretKey: Uint8Array): Uint8Array {
 export function dhShared(secretKey: Uint8Array, peerPublic: Uint8Array): Uint8Array {
   if (secretKey.length !== X25519_SK_LEN) throw new Error("TR_DH_SK");
   if (peerPublic.length !== X25519_PK_LEN) throw new Error("TR_DH_PK");
-  return x25519.getSharedSecret(secretKey, peerPublic);
+  let ss: Uint8Array;
+  try {
+    ss = x25519.getSharedSecret(secretKey, peerPublic);
+  } catch {
+    throw new Error("TR_DH_WEAK");
+  }
+  let z = 0;
+  for (let i = 0; i < ss.length; i++) z |= ss[i]!;
+  if (z === 0) throw new Error("TR_DH_WEAK");
+  return ss;
 }

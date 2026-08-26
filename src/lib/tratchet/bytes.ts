@@ -42,6 +42,7 @@ export function toHex(b: Uint8Array): string {
 export function fromHex(h: string): Uint8Array {
   const hex = h.replace(/^0x/i, "").replace(/\s+/g, "");
   if (hex.length % 2) throw new Error("TR_HEX_ODD");
+  if (hex.length > 0 && !/^[0-9a-fA-F]+$/.test(hex)) throw new Error("TR_HEX");
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
