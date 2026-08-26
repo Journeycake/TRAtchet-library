@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-bg: #08090b;
+  --color-bg-elevated: #101216;
+  --color-bg-subtle: #171c21;
+  --color-fg: #e8ecea;
+  --color-muted: #8b9390;
+  --color-subtle: #5c6562;
+  --color-border: #23282c;
+  --color-border-strong: #343b40;
+  --color-accent: #6ee7b7;
+  --color-accent-dim: #0f3d32;
+  --color-accent-fg: #06211b;
+  --color-danger: #e07a7a;
+  --color-ok: #8fcaa0;
+  --color-warn: #c4b08a;
+
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  --shadow-border: 0 0 0 1px rgb(232 236 234 / 0.08);
+  --shadow-border-hover: 0 0 0 1px rgb(232 236 234 / 0.14);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+@layer utilities {
+  .lab-grid {
+    background-image:
+      linear-gradient(to right, rgb(232 236 234 / 0.035) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(232 236 234 / 0.035) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .lab-shell {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .lab-main {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  @media (min-width: 1024px) {
+    .lab-main {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
